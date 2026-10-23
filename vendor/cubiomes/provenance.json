@@ -1,0 +1,92 @@
+{
+  "upstream": "https://github.com/Cubitect/cubiomes",
+  "commit": "e61f90580cbdd883214a8054670dacae655e59c0",
+  "sourceURL": "https://github.com/Cubitect/cubiomes/tree/e61f90580cbdd883214a8054670dacae655e59c0",
+  "license": "MIT",
+  "scope": "C source/header/table closure for structures with one documented fortress capacity-safety patch; no viewer, game code, game assets, tests, utilities, native objects or archives.",
+  "files": {
+    "biomenoise.c": {
+      "sha256": "0c8cc854b9e0d8b913eb51820edfbc26ae79c33697b74a996b5e3b102645133b",
+      "bytes": 68348
+    },
+    "biomenoise.h": {
+      "sha256": "7122e30c86d18b0873e29017b44fb22746143b69cb6baa1b6e0ada07cd26f88e",
+      "bytes": 10639
+    },
+    "biomes.c": {
+      "sha256": "d94ce8959e04a493e31e4a86ba7c5ccdbb02cdef68eca0f2bd53cbd45d15e279",
+      "bytes": 11707
+    },
+    "biomes.h": {
+      "sha256": "7c8b89a139526e2efcadd221a00b9253f16dab03eec92db7ce35b1d8e7f894ba",
+      "bytes": 7432
+    },
+    "finders.c": {
+      "sha256": "adb9b9707b05299c8f4aeea709b5b138585ea1d9ae76d203a24dc405cd31e14a",
+      "bytes": 183405,
+      "upstreamSha256": "cbf071321c3816e20b4bdf6999b0749c5ba4fc6042aa1ed7079f550f6e15a364",
+      "upstreamBytes": 183362,
+      "patch": {
+        "function": "addFortressPiece",
+        "change": "Insert if (*env->n >= env->nmax) return NULL; as the first statement.",
+        "reason": "Upstream assigns PieceEnv.nmax but does not check it before appending fortress pieces. Honor caller capacity before writing to prevent out-of-bounds corruption and hangs; callers retry larger buffers or report an explicit resource bound."
+      }
+    },
+    "finders.h": {
+      "sha256": "89bde20ae193459c87567b6e9b3742de87620bfaed574e5f5c9e1b4919eed67c",
+      "bytes": 29729
+    },
+    "generator.c": {
+      "sha256": "f82ab68df638874d407dd09e9fe810b6be385814106c0f09ea3d6a63f9badca7",
+      "bytes": 27710
+    },
+    "generator.h": {
+      "sha256": "963a919e0baf33af9acc5f944f935bd0c025985a64d31a5e11b2736752353517",
+      "bytes": 4364
+    },
+    "layers.c": {
+      "sha256": "b7f704e3deec7d0eccaf3d39fe6e8397b28adc49738e210bbaa618a4cb9186b6",
+      "bytes": 60029
+    },
+    "layers.h": {
+      "sha256": "926334c371a9e8408f107b0d999b87023cca2f548c23c64254566d3a8dcb97e1",
+      "bytes": 6659
+    },
+    "noise.c": {
+      "sha256": "62683d2d76928c56a2a8b71e21a5dfc2ea6fd28c40c1c723e962a0e8bf44e726",
+      "bytes": 16503
+    },
+    "noise.h": {
+      "sha256": "822f660d9f8f3e7fbd938f41bc48aebc70fde72858f0884a5908fc2f51dbaa98",
+      "bytes": 2454
+    },
+    "rng.h": {
+      "sha256": "2444c5429a7b2ffae21bef7eee73330bba89af5a73ef4f6973288f13a7fbdf70",
+      "bytes": 10039
+    },
+    "tables/btree18.h": {
+      "sha256": "c7bbd595cf096f471f88b3f279941b69e4cbb2f320dfdf531f4a6aeaa0095fad",
+      "bytes": 173746
+    },
+    "tables/btree19.h": {
+      "sha256": "a5dc2ad87a80436fc80816dc62060e784d8a4b6a33284e429ae71f46fb11d916",
+      "bytes": 188187
+    },
+    "tables/btree192.h": {
+      "sha256": "9447413e158d57348262faf62d91576973e39d682488f188a1aee8abe369416d",
+      "bytes": 173919
+    },
+    "tables/btree20.h": {
+      "sha256": "8efd25b3165f457d30f9f7fe41f565cba842aa8513038a7e5ed273e481f2aa3b",
+      "bytes": 188194
+    },
+    "tables/btree21wd.h": {
+      "sha256": "ce8cc83f9be7e2bd6e61589bfb5c401451ac01c49032f51949ad7de0cfb303d9",
+      "bytes": 188214
+    },
+    "LICENSE": {
+      "sha256": "894d391566a3bb235b1df6c278960b2083769076b0199a0a367c771b05a74120",
+      "bytes": 1065
+    }
+  }
+}

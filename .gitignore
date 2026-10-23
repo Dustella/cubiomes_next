@@ -1,0 +1,21 @@
+node_modules/
+# Bundles are derived from Mojang data files; build them locally, never commit.
+bundles/
+*.bundle.json
+# Ground-truth dumps produced by running the official jar.
+gt-out/
+tools/gt/*.class
+logs/
+dist/
+.vite/
+.env
+.env.*
+!.env.example
+# Official inputs and local research must never enter this repository.
+official_source/
+*.jar
+*.class
+*.exe
+*.pdb
+*.zip
+*.tar.gz
