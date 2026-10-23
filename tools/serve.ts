@@ -12,9 +12,6 @@ const port = portArg > 0 ? Number(Bun.argv[portArg + 1]) : 8787;
 const bundlesDir = join(root, 'bundles');
 
 const ENTRIES: Record<string, string> = {
-  '/app.js': 'src/web/app.ts',
-  '/viewer-worker.js': 'src/web/viewer-worker.ts',
-  '/viewer-worker.ts': 'src/web/viewer-worker.ts',
   '/gpu-diff.js': 'src/web/gpu-diff.ts',
   '/version-diff.js': 'src/web/version-diff.ts',
   '/structure-diff.js': 'src/web/structure-diff.ts',

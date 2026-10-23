@@ -1,11 +1,43 @@
-# WebGPU Cubiomes
+# Cubiomes Next
 
 Clean-room Minecraft biome and structure calculations, with WebGPU biome compute and a dedicated WASM structure worker.
 
 - **Cubiomes release library:** all release majors from 1.0 through **1.21.3**, across Overworld / Nether / End; no game jars or bundles required.
-- **Existing bundle path:** data-driven 1.18+ generation and viewer, including the existing 1.21.4 and 26.2 bundles, datapacks, and Amplified.
+- **Bundle path:** data-driven 1.18+ generation, datapacks and Amplified in the library; the atlas additionally discovers locally generated normal-world 1.21.4 / 26.2 bundles.
 - **Structure library:** all 25 Cubiomes structure/decorator types plus strongholds and related layout/gateway APIs, from 1.0 through **1.21.4 inclusive**, running off-thread in WASM.
 - **26.2 structure-set experiment:** separate data-bundle worker for verified candidates, placement rules, adjusted stronghold rings and explicit-point biome eligibility; not complete terrain-dependent structure generation. See [scope and evidence](docs/26.2-structures.md).
+- **Seed atlas:** Vue **3.6.0-rc.13**, pure Vapor components / `createVaporApp`, **Vite 8.3.5** and UnoCSS **66.11.0**. Responsive Minecraft-inspired controls, biome maps and worker-backed structure overlays.
+
+## Run the atlas
+
+```sh
+git clone https://github.com/Dustella/cubiomes_next.git
+cd cubiomes_next
+bun install --frozen-lockfile
+bun run dev                 # http://localhost:8787
+```
+
+No Java, official game files or extracted bundles are needed for the default **1.21.3** world or the other 24 built-in release entries. The checked-in `public/structure-worker.js`, `structures.wasm` and notices make structure overlays work immediately. WebGPU needs HTTPS or localhost; if unavailable or a compute run fails, the atlas explicitly displays **CPU worker** and performs sampling in a dedicated worker rather than blocking the UI. This viewer fallback does not change the GPU library's strict API.
+
+- Enter a numeric/text seed, version, center X/Z and sampling Y, then **生成地图**. Dimension buttons apply the current settings immediately.
+- Drag or use arrow keys to pan; wheel, `+`/`-`, toolbar buttons, or two-finger pinch to zoom. **⌖** returns to the origin.
+- **结构图层** toggles version/dimension-appropriate candidates. Click a marker for coordinates and the exact scope of its checks; copy coordinates from the card.
+- **群系** lists sampled biome coverage at the selected height. The reference grid is a screen-space aid, **not a chunk grid**.
+- Share copies a URL containing the normalized seed, applied world settings, center, zoom and selected layers. Export saves the biome sample PNG **without structure markers**.
+- On phones, bottom navigation opens a scrollable sheet; Escape/close dismisses it. Closed controls are inert; open sheets isolate background interaction and trap keyboard focus. Safe-area insets and reduced-motion preferences are respected.
+- Seeds are computed locally. There is no seed-upload endpoint, analytics or external asset/font service.
+
+Structure scan limits are deliberate and disclosed: at most 256 central placement regions per layer, 4,096 across the selected layers, and 2,048 displayed markers. Empty areas outside a clipped scan do **not** prove absence. Cubiomes strongholds use the full available list; the 26.2 overlay currently queries only the first **16** adjusted ring positions, explicitly labeled. 26.2 markers confirm placement/frequency/exclusion, not generation starts, terrain or pieces.
+
+```sh
+bun run typecheck
+bun test
+bun run build               # self-contained static dist/, no official-derived bundles
+bun run preview             # preview production build at localhost:8787
+```
+
+Deploy `dist/` at the origin root over HTTPS. Keep `structure-worker.js`, `structures.wasm` and `structures.LICENSE.txt` together. `dist/bundles/index.json` intentionally contains `[]`: builds never redistribute locally extracted game data implicitly. Development servers bind to all interfaces; use only on a trusted network.
+
 
 ## Bundle-based 1.18+ path
 
@@ -65,7 +97,7 @@ console.log(SUPPORTED_VERSIONS.map(v => v.id));
 - Large Biomes is Overworld-only, introduced in 1.3. Amplified is not a Cubiomes release-library preset; the separate bundle path retains its existing support.
 - This is the native quart biome grid, **not block-resolution Voronoi zoom**. Pre-1.18 Overworld and standard Nether/End previews ignore Y, matching Cubiomes. Pre-1.16 Nether is biome 8; pre-1.9 End is biome 9.
 - GPU runners allow one in-flight run. Await it before `setSeed`, another `run`, or `destroy`. Destruction is idempotent; later use is rejected. Separate runners can share a device.
-- The viewer remains the existing bundle viewer; this change adds the release **library**, not a new version-selection UI.
+- The Vapor atlas exposes all built-in release entries and three dimensions; optional local bundles are described below. Advanced Large Biomes/datapack/preset options remain library APIs.
 
 ### Algorithms and accuracy
 
@@ -96,7 +128,7 @@ bun run release-fixtures
 bun run check-releases
 bun run typecheck
 bun test
-bun run serve
+bun run serve:verification
 ```
 
 Native results/fixtures are local ignored artifacts, not runtime library assets. Open `/version-diff.html` on the WebGPU-capable browser, then run:
@@ -229,7 +261,7 @@ bun run structure-fixtures
 bun run check:structures
 bun run typecheck
 bun test
-bun run serve
+bun run serve:verification
 ```
 
 Open `/structure-diff.html` in a real browser, call `await window.structureVerification.initialize()`, then `runCases(start,end)` in bounded batches through 3658; inspect `reports` and call `release()` afterwards.
@@ -256,22 +288,23 @@ vendor/cubiomes/ MIT source snapshot, source hashes, and recorded capacity safet
 public/        deployable worker/WASM/license assets and browser verification pages
 src/core/      CPU reference (f64): RNG, MD5 seeding, noise, density-function compiler/evaluator, climate R-tree, End islands
 src/gpu/       WGSL codegen from the same IR + WebGPU runner
-src/web/       viewer (app.ts) and in-browser GPU-vs-CPU diff entry
-tools/         bundle builder, ground-truth (GT) harnesses, headless WebGPU driver, dev server
+src/web/       pure Vapor atlas, viewer runtime / CPU worker, browser differential entries
+tools/         bundle builders, GT harnesses, headless driver, separate verification server
 test/          unit tests (no Mojang data needed)
 ```
 
-## Bundle viewer usage
+## Optional local bundle versions
 
 ```sh
-bun install
-# 1. Build a bundle from any 1.18+ server jar (runs the vanilla data generator locally)
+# Build locally from your own official input; outputs remain gitignored:
 bun tools/make-bundle.ts --server path/to/server.jar --out bundles/26.2.bundle.json
-# 2. Viewer (development server binds 0.0.0.0; no auth, do not expose publicly)
-bun tools/serve.ts            # http://127.0.0.1:8787
+# The same command with a 1.21.4 jar and bundles/1.21.4.bundle.json adds 1.21.4.
+# For 26.2 structure layers, also generate the separate structure registry bundle:
+bun run bundle:structures --data path/to/generated/data/minecraft --biomes bundles/26.2.bundle.json --out bundles/26.2.structures.bundle.json
+bun run dev
 ```
 
-The viewer lists `bundles/*.bundle.json` and also accepts a bundle file from disk. Bundle format: `src/core/bundle.ts`. To support a future version, run `make-bundle.ts` on its jar. A custom/datapack world can edit the JSON: density functions, noises, biome boxes, or `legacy_noise_overrides`.
+Vite discovers exactly `bundles/1.21.4.bundle.json` and `bundles/26.2.bundle.json`, labeled **local bundle** in the version menu; structure bundles are excluded from the biome-only index. A missing/broken structure bundle reports a layer-specific error without preventing the biome map from rendering. Other versions, arbitrary bundle file upload, datapacks and non-normal presets remain accessible through the library/builder rather than the atlas UI. Bundle schema: `src/core/bundle.ts`; 26.2 structure setup: [docs/26.2-structures.md](docs/26.2-structures.md).
 
 Unsupported density-function types fail with the JSON path of the offending node rather than rendering wrong output.
 
@@ -325,7 +358,22 @@ Residual error lives in f32 octave sums and splines. It shows up only as ±1-qua
 
 ### Viewer
 
-`bun tools/viewer-smoke.ts` drives the real page headlessly: bundle select, dimension, Y, zoom and seed. It saves screenshots to `gt-out/shots/`. Checked: 26.2 overworld (surface and y=-30 with lush_caves / dripstone_caves / deep_dark), nether, end, and switching to the 1.21.4 bundle.
+`bun tools/viewer-smoke.ts --chrome <chrome> --url http://127.0.0.1:8787/` exercises the actual Vapor UI: all three dimensions, an older release and seed change, village overlays/details, mobile layout and drawer isolation. It saves screenshots to ignored `gt-out/shots/`. The historical bundle-viewer measurements above predate this frontend.
+
+The standalone differential pages remain on the separate `bun run serve:verification` server; stop Vite first or choose a different `--port`. They are diagnostic tools, not routes in the production atlas.
+
+Current atlas smoke evidence:
+
+| Surface | Exercised result |
+| --- | --- |
+| Attached Nvidia WebGPU | Built-in 1.21.3 and local 26.2 maps; real worker village candidates and clickable detail cards |
+| Responsive layouts | 375, 768, 1280, 1440 and 1920 px; no horizontal page overflow |
+| Headless UI command | All three dimensions, 1.7.10 / seed -1, 9 village markers, mobile sheet open/close and inert background checks passed |
+| Production build | 25 built-in versions, working biome maps and 11 village markers; no local official bundles required |
+| Worker fallback | Explicitly disabled WebGPU: CPU-worker map rendered; backend is identified in the UI, with its full reason in the badge tooltip |
+| Seed changes | Shader runner retained across seeds; 4,082 changed samples, zero mismatches against the CPU reference in a 64×64 probe |
+
+Seed-only changes upload new seed state rather than recompiling the GPU pipeline. The headless driver now uses an OS-native temporary profile path and reports CDP connection failures instead of hanging; generated profiles are removed after exit.
 
 Unit tests: `bun test`.
 

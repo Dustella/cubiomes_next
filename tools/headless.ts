@@ -1,5 +1,9 @@
 // Minimal Chrome DevTools Protocol driver for headless WebGPU runs.
 // Uses SwiftShader's software Vulkan when no hardware adapter is available.
+import { mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export interface Headless {
   evaluate<T>(expression: string): Promise<T>;
@@ -22,22 +26,30 @@ export const DEFAULT_GPU_FLAGS = [
 
 export async function launch(chrome: string, url: string, flags = DEFAULT_GPU_FLAGS, viewport = { width: 1280, height: 800 }): Promise<Headless> {
   const port = 9300 + Math.floor(Math.random() * 600);
+  const profile = mkdtempSync(join(tmpdir(), 'webgpu-cubiomes-chrome-'));
   const proc = Bun.spawn([chrome, '--headless=new', '--no-sandbox', `--remote-debugging-port=${port}`,
-    `--user-data-dir=/tmp/webgpu-cubiomes-chrome-${port}`, ...flags, 'about:blank'], { stdout: 'ignore', stderr: 'ignore' });
+    `--user-data-dir=${profile}`, ...flags, 'about:blank'], { stdout: 'ignore', stderr: 'pipe' });
+  const stderr = new Response(proc.stderr).text();
+  const cleanup = (): void => { void proc.exited.then(() => rm(profile, { recursive: true, force: true, maxRetries: 5 })).catch(console.error); };
   let wsUrl = '';
   for (let i = 0; i < 100 && !wsUrl; i++) {
     await Bun.sleep(100);
+    if (proc.exitCode !== null) break;
     try {
-      const list = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as { type: string; webSocketDebuggerUrl: string }[];
+      const list = (await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) })).json()) as { type: string; webSocketDebuggerUrl: string }[];
       wsUrl = list.find((t) => t.type === 'page')?.webSocketDebuggerUrl ?? '';
     } catch { /* not up yet */ }
   }
-  if (!wsUrl) { proc.kill(); throw new Error('chrome did not expose a page target'); }
+  if (!wsUrl) { proc.kill(); cleanup(); throw new Error(`Chrome did not expose a page target: ${await stderr}`); }
 
   const ws = new WebSocket(wsUrl);
   const opened = Promise.withResolvers<void>();
+  const openDeadline = setTimeout(() => opened.reject(new Error('Chrome CDP WebSocket open timed out')), 10000);
   ws.onopen = () => opened.resolve();
-  await opened.promise;
+  ws.onerror = () => opened.reject(new Error('Chrome CDP WebSocket connection failed'));
+  try { await opened.promise; }
+  catch (error) { ws.close(); proc.kill(); cleanup(); throw error; }
+  finally { clearTimeout(openDeadline); }
   let id = 0;
   const pending = new Map<number, (v: CdpReply) => void>();
   ws.onmessage = (m) => {
@@ -71,6 +83,7 @@ export async function launch(chrome: string, url: string, flags = DEFAULT_GPU_FL
     close(): void {
       ws.close();
       proc.kill();
+      cleanup();
     },
   };
 }

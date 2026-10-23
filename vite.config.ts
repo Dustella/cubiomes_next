@@ -9,6 +9,13 @@ function localBundles(): Plugin {
   const root = resolve(import.meta.dirname, "bundles");
   return {
     name: "local-worldgen-bundles",
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "bundles/index.json",
+        source: "[]",
+      });
+    },
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const pathname = new URL(req.url ?? "/", "http://localhost").pathname;

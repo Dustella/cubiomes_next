@@ -52,6 +52,7 @@ export class ViewerRuntime {
   private queue: Promise<unknown> = Promise.resolve();
   private closed = false;
   private worldKey = '';
+  private biomeKey = '';
   private versionList?: Promise<ViewVersion[]>;
   private readonly localBundles = new Map<string, string>();
   private device?: GPUDevice;
@@ -123,7 +124,10 @@ export class ViewerRuntime {
     if (!this.localBundles.has(world.version)) resolveVersion(world.version);
     const key = `${world.version}/${world.dimension}/${world.seed}`;
     if (key === this.worldKey) return;
-    this.releaseGpu();
+    const biomeKey = `${world.version}/${world.dimension}`;
+    if (biomeKey !== this.biomeKey || this.deviceLost) this.releaseGpu();
+    else this.runner?.setSeed(world.seed);
+    this.biomeKey = biomeKey;
     this.stopCpu();
     this.structures?.terminate();
     this.bundleStructures?.terminate();

@@ -1,5 +1,12 @@
 <script setup lang="ts" vapor>
-import { computed, onMounted, onUnmounted, ref, shallowRef } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  ref,
+  shallowRef,
+} from "vue";
 import { parseSeed } from "../core/rng";
 import { biomeColor } from "./colors";
 import {
@@ -24,6 +31,12 @@ const cx = ref(0),
 const world = shallowRef<ViewWorld | null>(null);
 const tab = ref("world"),
   panelOpen = ref(false);
+const mobileQuery = matchMedia("(max-width: 760px)");
+const mobile = ref(mobileQuery.matches);
+const syncMobile = (): void => {
+  mobile.value = mobileQuery.matches;
+};
+const panel = ref<HTMLElement>();
 const canvas = ref<HTMLCanvasElement>(),
   surface = ref<HTMLDivElement>();
 const frame = shallowRef<
@@ -84,7 +97,7 @@ const blocksPerPixel = computed(() =>
     : zoom.value / 2,
 );
 const scale = computed(() => {
-  const wanted = blocksPerPixel.value * 110;
+  const wanted = blocksPerPixel.value * (mobile.value ? 65 : 110);
   const power = 10 ** Math.floor(Math.log10(Math.max(1, wanted)));
   const blocks =
     [5, 2, 1].map((n) => n * power).find((n) => n <= wanted) ?? power;
@@ -156,16 +169,20 @@ function paint(result: ViewFrame, region: ViewRegion): void {
       percent: ((count / result.biomes.length) * 100).toFixed(1),
     }));
 }
-function updateURL(): void {
+function updateURL(
+  activeWorld: ViewWorld,
+  camera: { x: number; z: number; zoom: number },
+): void {
   const params = new URLSearchParams({
-    seed: world.value!.seed.toString(),
-    version: version.value,
-    dim: dimension.value,
-    x: String(cx.value),
-    z: String(cz.value),
-    y: String(height.value),
-    zoom: String(zoom.value),
+    seed: activeWorld.seed.toString(),
+    version: activeWorld.version,
+    dim: activeWorld.dimension,
+    x: String(camera.x),
+    z: String(camera.z),
+    y: String(activeWorld.y),
+    zoom: String(camera.zoom),
   });
+  for (const id of selectedLayers.value) params.append("layer", id);
   history.replaceState(null, "", `${location.pathname}?${params}`);
 }
 async function render(): Promise<void> {
@@ -177,7 +194,8 @@ async function render(): Promise<void> {
     while (handled < request && !disposed) {
       const seq = request,
         activeWorld = world.value!,
-        region = makeRegion();
+        region = makeRegion(),
+        camera = { x: cx.value, z: cz.value, zoom: zoom.value };
       handled = seq;
       error.value = "";
       status.value = "正在计算群系…";
@@ -216,7 +234,7 @@ async function render(): Promise<void> {
         markers.value = nextMarkers;
         elapsed.value = performance.now() - started;
         status.value = `${region.w} × ${region.h} 群系采样 · ${elapsed.value.toFixed(0)} ms`;
-        updateURL();
+        updateURL(activeWorld, camera);
       } catch (reason) {
         if (seq !== request) continue;
         error.value = reason instanceof Error ? reason.message : String(reason);
@@ -295,6 +313,35 @@ function toggleLayer(id: string): void {
 function openTab(next: string): void {
   tab.value = next;
   panelOpen.value = true;
+  if (mobile.value)
+    void nextTick(() =>
+      panel.value?.querySelector<HTMLButtonElement>(".close-panel")?.focus(),
+    );
+}
+function panelKeyboard(event: KeyboardEvent): void {
+  if (!mobile.value || !panelOpen.value) return;
+  if (event.key === "Escape") {
+    panelOpen.value = false;
+    surface.value?.focus();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(
+    panel.value!.querySelectorAll<HTMLElement>(
+      "button, input, select, a[href]",
+    ),
+  ).filter(
+    (el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0,
+  );
+  const first = focusable[0],
+    last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first?.focus();
+  }
 }
 async function copy(text: string): Promise<void> {
   try {
@@ -441,9 +488,11 @@ function keyboard(event: KeyboardEvent): void {
   else if (event.key === "Escape") selectedMarker.value = null;
 }
 onMounted(async () => {
+  mobileQuery.addEventListener("change", syncMobile);
   try {
     versions.value = await runtime.versions();
     const params = new URLSearchParams(location.search);
+    selectedLayers.value = [...new Set(params.getAll("layer"))].slice(0, 64);
     if (versions.value.some((v) => v.id === params.get("version")))
       version.value = params.get("version")!;
     if (dimensions.some((d) => d.id === params.get("dim")))
@@ -474,6 +523,7 @@ onUnmounted(() => {
   disposed = true;
   runtime.destroy();
   resizeObserver?.disconnect();
+  mobileQuery.removeEventListener("change", syncMobile);
   clearTimeout(toastTimer);
   clearTimeout(resizeTimer);
   clearTimeout(wheelTimer);
@@ -482,7 +532,7 @@ onUnmounted(() => {
 
 <template>
   <div class="atlas-shell">
-    <header class="app-header row-between">
+    <header class="app-header row-between" :inert="mobile && panelOpen">
       <a class="brand" href="/" aria-label="Cubiomes Next 首页"
         ><span class="brand-cube" aria-hidden="true"><i></i></span
         ><span
@@ -491,9 +541,9 @@ onUnmounted(() => {
         ></a
       >
       <div class="header-right flex items-center gap-3">
-        <span class="engine-pill"
+        <span class="engine-pill" :title="backend"
           ><span class="status-dot" :class="{ working: busy }"></span
-          >{{ backend }}</span
+          >{{ backend.startsWith("CPU worker") ? "CPU worker" : backend }}</span
         >
         <a
           class="repo-link"
@@ -513,6 +563,11 @@ onUnmounted(() => {
     </header>
 
     <aside
+      ref="panel"
+      :inert="mobile && !panelOpen"
+      :role="mobile && panelOpen ? 'dialog' : undefined"
+      :aria-modal="mobile && panelOpen ? true : undefined"
+      @keydown="panelKeyboard"
       class="sidebar"
       :class="{ 'is-open': panelOpen }"
       aria-label="地图控制面板"
@@ -682,7 +737,7 @@ onUnmounted(() => {
           >
           <div class="info-note">
             <span aria-hidden="true">◇</span>
-            <p v-if="version === '26.2'">
+            <p v-if="world?.version === '26.2'">
               26.2
               实验：仅候选位置、频率与排除规则；尚未移植完整生成起点、地形和布局。
             </p>
@@ -724,7 +779,7 @@ onUnmounted(() => {
       @click="panelOpen = false"
     ></button>
 
-    <main class="map-main" aria-label="种子地图">
+    <main class="map-main" aria-label="种子地图" :inert="mobile && panelOpen">
       <div
         ref="surface"
         class="map-surface"
