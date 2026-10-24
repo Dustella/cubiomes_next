@@ -9,19 +9,21 @@ import { StructureWorker } from '../structures/client';
 import { BundleStructureWorker } from '../structures/bundle-client';
 import type { StructureConfig } from '../structures/types';
 import type { BundleCatalogResponse } from '../structures/bundle-schema';
-import { cubiomesNames, type ViewWorld, type ViewRegion, type ViewLayer, type ViewMarker, type ViewFrame, type ViewVersion, type ViewerCpuReply } from './viewer-types';
-export type { ViewWorld, ViewRegion, ViewLayer, ViewMarker, ViewFrame, ViewVersion } from './viewer-types';
+import { cubiomesNames, type ViewWorld, type ViewRegion, type ViewLayer, type ViewMarker, type ViewFrame, type ViewVersion, type ViewBounds, type ViewerCpuReply } from './viewer-types';
+export type { ViewWorld, ViewRegion, ViewLayer, ViewMarker, ViewFrame, ViewVersion, ViewBounds } from './viewer-types';
 
 type Runner = GpuVersionBiomeRunner | GpuBiomeRunner;
-type Bounds = { minX: number; minZ: number; maxX: number; maxZ: number };
+type Bounds = ViewBounds;
 type Scan = { regionX: number; regionZ: number; width: number; height: number; clipped: boolean };
 const COLORS = ['#eabf68', '#87d5c5', '#e496a6', '#9db9f3', '#c6a1e5', '#a9cf7c', '#e79b69'];
 const LIMIT = 30_000_000;
 const MARKER_LIMIT = 2048;
 const label = (id: string): string => id.replace(/^minecraft:/, '').replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
-/** Expand the sampled quart footprint into half-open block bounds. */
-function bounds(r: ViewRegion): Bounds {
-  return { minX: r.x0 * 4, minZ: r.z0 * 4, maxX: (r.x0 + r.w * r.step) * 4, maxZ: (r.z0 + r.h * r.step) * 4 };
+function checkBounds(b: Bounds): Bounds {
+  const v = [b.minX, b.minZ, b.maxX, b.maxZ];
+  if (!v.every(Number.isSafeInteger) || b.maxX <= b.minX || b.maxZ <= b.minZ) throw new RangeError('Marker bounds must be a non-empty integer block rectangle');
+  const clamp = (n: number): number => Math.max(-LIMIT, Math.min(LIMIT, n));
+  return { minX: clamp(b.minX), minZ: clamp(b.minZ), maxX: clamp(b.maxX), maxZ: clamp(b.maxZ) };
 }
 function inside(b: Bounds, x: number, z: number): boolean {
   return x >= b.minX && x < b.maxX && z >= b.minZ && z < b.maxZ;
@@ -45,13 +47,17 @@ function scanBounds(b: Bounds, span: number, budget: number): Scan | null {
   return { regionX: x0, regionZ: z0, width, height, clipped: width !== originalW || height !== originalH || b.minX < -LIMIT || b.minZ < -LIMIT || b.maxX > LIMIT || b.maxZ > LIMIT };
 }
 
-/** Serializes GPU and worker operations, including world transitions. destroy()
- * terminates workers immediately but retires GPU resources only after a run
- * settles, as required by the biome runner's idle-only destruction contract. */
+/** Two independent serial lanes: biome sampling (GPU / CPU worker) and
+ * structure queries (WASM / bundle workers). A slow structure scan never
+ * delays biome tiles, and vice versa. Each lane tracks its own world.
+ * destroy() terminates workers immediately but retires GPU resources only
+ * after the biome lane settles (idle-only destruction contract). */
 export class ViewerRuntime {
-  private queue: Promise<unknown> = Promise.resolve();
+  private biomeQueue: Promise<unknown> = Promise.resolve();
+  private structureQueue: Promise<unknown> = Promise.resolve();
   private closed = false;
-  private worldKey = '';
+  private biomeWorldKey = '';
+  private structureWorldKey = '';
   private biomeKey = '';
   private versionList?: Promise<ViewVersion[]>;
   private readonly localBundles = new Map<string, string>();
@@ -73,14 +79,17 @@ export class ViewerRuntime {
   private assertOpen(): void {
     if (this.closed) throw new Error('Viewer runtime has been destroyed');
   }
-  private serial<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(async () => {
+  private enqueue<T>(lane: 'biome' | 'structure', operation: () => Promise<T>): Promise<T> {
+    const previous = lane === 'biome' ? this.biomeQueue : this.structureQueue;
+    const result = previous.then(async () => {
       this.assertOpen();
       const value = await operation();
       this.assertOpen();
       return value;
     });
-    this.queue = result.catch(() => {});
+    const settled = result.catch(() => {});
+    if (lane === 'biome') this.biomeQueue = settled;
+    else this.structureQueue = settled;
     return result;
   }
 
@@ -115,20 +124,29 @@ export class ViewerRuntime {
     this.runner = undefined;
     this.gpuNames = [];
   }
-  private async useWorld(world: ViewWorld): Promise<void> {
+  private async checkWorld(world: ViewWorld): Promise<string> {
     validateSeed(world.seed);
     if (!['overworld', 'nether', 'end'].includes(world.dimension)) throw new RangeError('Unknown dimension');
     if (!Number.isFinite(world.y)) throw new RangeError('Y must be finite');
     await this.versions();
     this.assertOpen();
     if (!this.localBundles.has(world.version)) resolveVersion(world.version);
-    const key = `${world.version}/${world.dimension}/${world.seed}`;
-    if (key === this.worldKey) return;
+    return `${world.version}/${world.dimension}/${world.seed}`;
+  }
+  private async useBiomeWorld(world: ViewWorld): Promise<void> {
+    const key = await this.checkWorld(world);
+    if (key === this.biomeWorldKey && !this.deviceLost) return;
     const biomeKey = `${world.version}/${world.dimension}`;
     if (biomeKey !== this.biomeKey || this.deviceLost) this.releaseGpu();
     else this.runner?.setSeed(world.seed);
     this.biomeKey = biomeKey;
-    this.stopCpu();
+    this.gpuFailure = '';
+    if (this.deviceLost) { this.device = undefined; this.deviceLost = false; }
+    this.biomeWorldKey = key;
+  }
+  private async useStructureWorld(world: ViewWorld): Promise<void> {
+    const key = await this.checkWorld(world);
+    if (key === this.structureWorldKey) return;
     this.structures?.terminate();
     this.bundleStructures?.terminate();
     this.structures = undefined;
@@ -137,9 +155,7 @@ export class ViewerRuntime {
     this.bundleCatalog = undefined;
     this.layerList = undefined;
     this.rings.clear();
-    this.gpuFailure = '';
-    if (this.deviceLost) { this.device = undefined; this.deviceLost = false; }
-    this.worldKey = key;
+    this.structureWorldKey = key;
   }
 
   private async getDevice(): Promise<GPUDevice> {
@@ -209,9 +225,9 @@ export class ViewerRuntime {
 
   frame(world: ViewWorld, region: ViewRegion): Promise<ViewFrame> {
     world = { ...world }; region = { ...region };
-    return this.serial(async () => {
+    return this.enqueue('biome', async () => {
       validateRegion({ ...region, qy: Math.floor(world.y / 4) });
-      await this.useWorld(world);
+      await this.useBiomeWorld(world);
       if (!this.gpuFailure) {
         try {
           const runner = await this.getRunner(world);
@@ -266,16 +282,18 @@ export class ViewerRuntime {
 
   layers(world: ViewWorld): Promise<ViewLayer[]> {
     world = { ...world };
-    return this.serial(async () => { await this.useWorld(world); return (await this.getLayers(world)).map(l => ({ ...l })); });
+    return this.enqueue('structure', async () => { await this.useStructureWorld(world); return (await this.getLayers(world)).map(l => ({ ...l })); });
   }
 
-  markers(world: ViewWorld, region: ViewRegion, layerIds: string[]): Promise<ViewMarker[]> {
-    world = { ...world }; region = { ...region }; layerIds = [...new Set(layerIds)];
-    return this.serial(async () => {
-      validateRegion({ ...region, qy: Math.floor(world.y / 4) });
-      await this.useWorld(world);
+  /** Structure candidates inside half-open block bounds. Bounds are clamped to
+   * the structure API border; dense layers scan only central regions. */
+  markers(world: ViewWorld, area: ViewBounds, layerIds: string[]): Promise<ViewMarker[]> {
+    world = { ...world }; layerIds = [...new Set(layerIds)];
+    const b = checkBounds(area);
+    return this.enqueue('structure', async () => {
+      await this.useStructureWorld(world);
       const layers = (await this.getLayers(world)).filter(l => layerIds.includes(l.id));
-      const b = bounds(region), markers: ViewMarker[] = [];
+      const markers: ViewMarker[] = [];
       const budget = Math.min(256, Math.max(1, Math.floor(4096 / Math.max(1, layers.length))));
       for (const layer of layers) {
         if (this.bundleStructures) await this.bundleMarkers(layer, b, budget, markers);
@@ -345,7 +363,7 @@ export class ViewerRuntime {
     this.stopCpu();
     this.structures?.terminate();
     this.bundleStructures?.terminate();
-    void this.queue.finally(() => {
+    void this.biomeQueue.finally(() => {
       this.releaseGpu();
       this.device?.destroy();
       this.device = undefined;

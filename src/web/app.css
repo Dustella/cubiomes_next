@@ -529,9 +529,41 @@ select {
   line-height: 1.6;
   margin-top: 3px;
 }
-.layer-glyph {
-  font-size: 16px;
+.layer-icon,
+.marker-row img,
+.marker-title img {
+  image-rendering: pixelated;
+  flex-shrink: 0;
   filter: drop-shadow(1px 2px #0d160f);
+}
+.marker-list {
+  margin-top: 22px;
+}
+.marker-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 6px;
+  background: none;
+  border-bottom: 1px solid #2a392b;
+  font-size: 11px;
+  text-align: left;
+}
+.marker-row > span:nth-child(2) {
+  flex: 1;
+}
+.marker-row .mono {
+  font-size: 10px;
+}
+.marker-row:hover,
+.marker-row.chosen {
+  background: #2c3b2c;
+}
+.marker-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .small-chip {
   font:
@@ -598,21 +630,16 @@ canvas {
   display: block;
   width: 100%;
   height: 100%;
-  image-rendering: pixelated;
   opacity: 0;
   transition: opacity 0.2s;
+  touch-action: none;
+  cursor: grab;
+}
+canvas:active {
+  cursor: grabbing;
 }
 canvas.has-frame {
   opacity: 1;
-}
-.map-grid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(#ebffdc23 1px, transparent 1px),
-    linear-gradient(90deg, #ebffdc23 1px, transparent 1px);
-  background-size: 64px 64px;
-  pointer-events: none;
 }
 .center-cross {
   position: absolute;
@@ -717,47 +744,6 @@ canvas.has-frame {
 .icon-button:hover {
   background: #405538;
   border-color: #60794f;
-}
-.map-marker {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  font-size: 22px;
-  color: var(--marker-color);
-  text-shadow:
-    -1px -1px #162017,
-    1px 1px #162017,
-    2px 3px 2px #000b;
-  z-index: 2;
-  cursor: pointer;
-}
-.map-marker:before {
-  content: "";
-  position: absolute;
-  width: 20px;
-  height: 20px;
-  background: #111b15;
-  border: 1px solid #e0e8ce88;
-  transform: rotate(45deg);
-  box-shadow: 2px 2px 4px #0006;
-  z-index: -1;
-}
-.map-marker.chosen {
-  z-index: 3;
-  color: #fff;
-  font-size: 26px;
-}
-.map-marker:hover {
-  filter: brightness(1.4);
-}
-.map-marker.chosen:before {
-  border-color: var(--accent);
-  background: #577444;
 }
 .map-navigation {
   position: absolute;
@@ -1406,10 +1392,6 @@ canvas.has-frame {
     background: #456033;
     color: #d5ecbd;
     border-radius: 2px;
-  }
-  .map-marker {
-    width: 36px;
-    height: 36px;
   }
   .marker-card {
     left: 13px;

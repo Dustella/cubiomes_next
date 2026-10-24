@@ -1,19 +1,13 @@
 <script setup lang="ts" vapor>
-import {
-  computed,
-  nextTick,
-  onMounted,
-  onUnmounted,
-  ref,
-  shallowRef,
-} from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from "vue";
 import { parseSeed } from "../core/rng";
 import { biomeColor } from "./colors";
+import { MapBoard, type BoardStatus } from "./map/board";
+import { MAX_SCALE, MIN_SCALE, scaleBar, type Camera } from "./map/camera";
+import { iconURL } from "./map/icons";
 import {
   ViewerRuntime,
   type ViewWorld,
-  type ViewRegion,
-  type ViewFrame,
   type ViewMarker,
   type ViewLayer,
   type ViewVersion,
@@ -26,8 +20,8 @@ const dimension = ref<ViewWorld["dimension"]>("overworld");
 const seed = ref("12345");
 const height = ref(64);
 const cx = ref(0),
-  cz = ref(0),
-  zoom = ref(16);
+  cz = ref(0);
+const camera = shallowRef<Camera>({ x: 0, z: 0, scale: 8 });
 const world = shallowRef<ViewWorld | null>(null);
 const tab = ref("world"),
   panelOpen = ref(false);
@@ -39,27 +33,21 @@ const syncMobile = (): void => {
 const panel = ref<HTMLElement>();
 const canvas = ref<HTMLCanvasElement>(),
   surface = ref<HTMLDivElement>();
-const frame = shallowRef<
-  (ViewFrame & { region: ViewRegion; world: ViewWorld }) | null
->(null);
 const layers = ref<ViewLayer[]>([]),
   selectedLayers = ref<string[]>([]);
 const markers = shallowRef<ViewMarker[]>([]),
   selectedMarker = shallowRef<ViewMarker | null>(null);
-const busy = ref(false),
-  error = ref(""),
-  status = ref("正在准备地图引擎…");
-const backend = ref("初始化"),
-  elapsed = ref(0),
-  grid = ref(false);
+const tiles = shallowRef<BoardStatus>({ missing: 1, loading: 0, ready: false, backend: "", lastMs: 0 });
+const hasFrame = ref(false);
+const markerBusy = ref(false);
+const busy = computed(() => tiles.value.loading > 0 || tiles.value.missing > 0 || markerBusy.value);
+const error = ref(""),
+  layerError = ref(""),
+  markerNote = ref("");
+const grid = ref(false);
 const hover = ref<{ x: number; z: number; name: string } | null>(null);
 const legend = ref<{ name: string; color: string; percent: string }[]>([]);
 const notice = ref("");
-const layerError = ref("");
-const shareLink = (): void => {
-  void copy(location.href);
-};
-const dragOffset = ref({ x: 0, y: 0 });
 const dimensions = [
   { id: "overworld", name: "主世界", glyph: "▰" },
   { id: "nether", name: "下界", glyph: "♨" },
@@ -68,41 +56,33 @@ const dimensions = [
 const dimensionName = computed(
   () => dimensions.find((d) => d.id === dimension.value)?.name ?? "主世界",
 );
-const zooms = [4, 8, 16, 32, 64, 128];
+const backend = computed(() => tiles.value.backend || "初始化");
+const status = computed(() =>
+  tiles.value.loading || tiles.value.missing
+    ? `正在计算群系图块 · 剩余 ${tiles.value.missing}`
+    : markerBusy.value
+      ? "正在计算结构图层…"
+      : "",
+);
 const displaySeed = computed(() => world.value?.seed.toString() ?? seed.value);
+const layerColors = computed(
+  () => new Map(layers.value.map((layer) => [layer.id, layer.color])),
+);
 const layerById = computed(
   () => new Map(layers.value.map((layer) => [layer.id, layer])),
 );
+/** Markers inside the viewport, nearest the centre first (accessible list). */
 const visibleMarkers = computed(() => {
-  const r = frame.value?.region;
-  if (!r) return [];
+  const c = camera.value, b = board?.bounds();
+  if (!b) return [];
   return markers.value
-    .map((marker) => ({
-      ...marker,
-      left: ((marker.x / 4 - r.x0) / (r.w * r.step)) * 100,
-      top: ((marker.z / 4 - r.z0) / (r.h * r.step)) * 100,
-    }))
-    .filter(
-      (marker) =>
-        marker.left >= 0 &&
-        marker.left <= 100 &&
-        marker.top >= 0 &&
-        marker.top <= 100,
-    );
+    .filter((m) => m.x >= b.minX && m.x < b.maxX && m.z >= b.minZ && m.z < b.maxZ)
+    .map((m) => ({ marker: m, d: Math.hypot(m.x - c.x, m.z - c.z) }))
+    .sort((a, b2) => a.d - b2.d)
+    .slice(0, 60)
+    .map((e) => e.marker);
 });
-const blocksPerPixel = computed(() =>
-  frame.value && surface.value
-    ? (frame.value.region.w * frame.value.region.step * 4) /
-      surface.value.clientWidth
-    : zoom.value / 2,
-);
-const scale = computed(() => {
-  const wanted = blocksPerPixel.value * (mobile.value ? 65 : 110);
-  const power = 10 ** Math.floor(Math.log10(Math.max(1, wanted)));
-  const blocks =
-    [5, 2, 1].map((n) => n * power).find((n) => n <= wanted) ?? power;
-  return { blocks, pixels: blocks / blocksPerPixel.value };
-});
+const scale = computed(() => scaleBar(camera.value.scale, mobile.value ? 65 : 110));
 const friendly = (name: string): string =>
   name
     .replace(/^minecraft:/, "")
@@ -111,14 +91,16 @@ const friendly = (name: string): string =>
     .join(" ");
 const color = (name: string): string =>
   "#" + biomeColor(name).toString(16).padStart(6, "0");
-let request = 0,
-  handled = 0,
-  running = false,
-  disposed = false,
+const icon = (layer: string): string =>
+  iconURL(layer, layerColors.value.get(layer) ?? "#e5c379");
+
+let board: MapBoard | undefined;
+let disposed = false,
   toastTimer = 0,
-  resizeTimer = 0;
+  markerSeq = 0,
+  markerRunning = false,
+  markerAgain = false;
 let layerKey = "";
-let resizeObserver: ResizeObserver | undefined;
 
 function toast(message: string): void {
   notice.value = message;
@@ -127,162 +109,137 @@ function toast(message: string): void {
     notice.value = "";
   }, 2800);
 }
-function makeRegion(): ViewRegion {
-  const width = surface.value?.clientWidth ?? 640,
-    h = surface.value?.clientHeight ?? 640;
-  const factor = Math.max(2, width / 448, h / 384);
-  const w = Math.max(16, Math.floor(width / factor)),
-    rows = Math.max(16, Math.floor(h / factor));
-  const step = zoom.value / 4;
-  return {
-    x0: Math.floor(cx.value / 4 - (w * step) / 2),
-    z0: Math.floor(cz.value / 4 - (rows * step) / 2),
-    w,
-    h: rows,
-    step,
-  };
+function message(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }
-function paint(result: ViewFrame, region: ViewRegion): void {
-  const target = canvas.value;
-  if (!target) return;
-  target.width = region.w;
-  target.height = region.h;
-  const context = target.getContext("2d")!;
-  const image = context.createImageData(region.w, region.h);
-  const palette = result.names.map((name) => biomeColor(name));
-  const counts = new Map<number, number>();
-  for (let i = 0; i < result.biomes.length; i++) {
-    const id = result.biomes[i]!,
-      rgb = palette[id] ?? 0x3c4540;
-    image.data[i * 4] = rgb >>> 16;
-    image.data[i * 4 + 1] = (rgb >>> 8) & 255;
-    image.data[i * 4 + 2] = rgb & 255;
-    image.data[i * 4 + 3] = 255;
-    counts.set(id, (counts.get(id) ?? 0) + 1);
-  }
-  context.putImageData(image, 0, 0);
-  legend.value = [...counts]
-    .sort((a, b) => b[1] - a[1])
-    .map(([id, count]) => ({
-      name: result.names[id] ?? `Biome ${id}`,
-      color: color(result.names[id] ?? String(id)),
-      percent: ((count / result.biomes.length) * 100).toFixed(1),
-    }));
-}
-function updateURL(
-  activeWorld: ViewWorld,
-  camera: { x: number; z: number; zoom: number },
-): void {
+function updateURL(): void {
+  const w = world.value, c = camera.value;
+  if (!w) return;
   const params = new URLSearchParams({
-    seed: activeWorld.seed.toString(),
-    version: activeWorld.version,
-    dim: activeWorld.dimension,
-    x: String(camera.x),
-    z: String(camera.z),
-    y: String(activeWorld.y),
-    zoom: String(camera.zoom),
+    seed: w.seed.toString(),
+    version: w.version,
+    dim: w.dimension,
+    x: String(Math.round(c.x)),
+    z: String(Math.round(c.z)),
+    y: String(w.y),
+    scale: String(+c.scale.toPrecision(4)),
   });
   for (const id of selectedLayers.value) params.append("layer", id);
   history.replaceState(null, "", `${location.pathname}?${params}`);
 }
-async function render(): Promise<void> {
-  request++;
-  if (running || !world.value || disposed) return;
-  running = true;
-  busy.value = true;
+function refreshLegend(): void {
+  const stats = board?.biomeStats() ?? [];
+  const total = stats.reduce((n, s) => n + s.count, 0) || 1;
+  legend.value = stats.map((s) => ({
+    name: s.name,
+    color: color(s.name),
+    percent: ((s.count / total) * 100).toFixed(1),
+  }));
+}
+
+/** World key changed: refresh the structure layer list (structure lane). */
+async function loadLayers(activeWorld: ViewWorld): Promise<void> {
+  const key = `${activeWorld.version}/${activeWorld.dimension}/${activeWorld.seed}`;
+  if (key === layerKey) return;
+  layerKey = key;
+  layerError.value = "";
   try {
-    while (handled < request && !disposed) {
-      const seq = request,
-        activeWorld = world.value!,
-        region = makeRegion(),
-        camera = { x: cx.value, z: cz.value, zoom: zoom.value };
-      handled = seq;
-      error.value = "";
-      status.value = "正在计算群系…";
-      const started = performance.now();
-      try {
-        const result = await runtime.frame(activeWorld, region);
-        if (seq !== request) continue;
-        paint(result, region);
-        frame.value = { ...result, region, world: activeWorld };
-        backend.value = result.backend;
-        status.value = "正在计算结构图层…";
-        const key = `${activeWorld.version}/${activeWorld.dimension}/${activeWorld.seed}`;
-        if (key !== layerKey) {
-          layerError.value = "";
-          try {
-            const nextLayers = await runtime.layers(activeWorld);
-            if (seq !== request) continue;
-            layers.value = nextLayers;
-            selectedLayers.value = selectedLayers.value.filter((id) =>
-              nextLayers.some((layer) => layer.id === id),
-            );
-            layerKey = key;
-          } catch (reason) {
-            if (seq !== request) continue;
-            layers.value = [];
-            selectedLayers.value = [];
-            layerError.value = `结构图层不可用：${reason instanceof Error ? reason.message : String(reason)}`;
-          }
-        }
-        const nextMarkers = selectedLayers.value.length
-          ? await runtime.markers(activeWorld, region, [
-              ...selectedLayers.value,
-            ])
-          : [];
-        if (seq !== request) continue;
-        markers.value = nextMarkers;
-        elapsed.value = performance.now() - started;
-        status.value = `${region.w} × ${region.h} 群系采样 · ${elapsed.value.toFixed(0)} ms`;
-        updateURL(activeWorld, camera);
-      } catch (reason) {
-        if (seq !== request) continue;
-        error.value = reason instanceof Error ? reason.message : String(reason);
-        status.value = "计算未完成";
-      }
-    }
-  } finally {
-    running = false;
-    busy.value = false;
+    const next = await runtime.layers(activeWorld);
+    if (world.value !== activeWorld) return;
+    layers.value = next;
+    selectedLayers.value = selectedLayers.value.filter((id) => next.some((l) => l.id === id));
+  } catch (reason) {
+    if (world.value !== activeWorld) return;
+    layers.value = [];
+    layerError.value = `结构图层不可用：${message(reason)}`;
   }
 }
+
+/** Latest-only marker query for the viewport plus a 50% margin. Old markers
+ * stay on the board until the new result arrives, so panning never flickers. */
+async function refreshMarkers(): Promise<void> {
+  if (markerRunning) {
+    markerAgain = true;
+    return;
+  }
+  markerRunning = true;
+  try {
+    do {
+      markerAgain = false;
+      const activeWorld = world.value, seq = ++markerSeq;
+      if (!activeWorld || !board || disposed) return;
+      await loadLayers(activeWorld);
+      const ids = [...selectedLayers.value];
+      if (!ids.length) {
+        markers.value = [];
+        markerNote.value = "";
+        board.setMarkers([], layerColors.value);
+        continue;
+      }
+      const b = board.bounds(), padX = (b.maxX - b.minX) / 2, padZ = (b.maxZ - b.minZ) / 2;
+      markerBusy.value = true;
+      try {
+        const result = await runtime.markers(activeWorld, {
+          minX: Math.floor(b.minX - padX),
+          minZ: Math.floor(b.minZ - padZ),
+          maxX: Math.ceil(b.maxX + padX),
+          maxZ: Math.ceil(b.maxZ + padZ),
+        }, ids);
+        if (seq !== markerSeq || world.value !== activeWorld || disposed) continue;
+        markers.value = result;
+        markerNote.value = result.some((m) => /clipped/.test(m.detail))
+          ? "视野较大，结构仅扫描中心区域；放大可查看更多。"
+          : "";
+        board.setMarkers(result, layerColors.value);
+        if (selectedMarker.value && !result.some((m) => m.id === selectedMarker.value!.id))
+          selectedMarker.value = null;
+      } catch (reason) {
+        if (seq === markerSeq) layerError.value = `结构计算失败：${message(reason)}`;
+      }
+    } while (markerAgain && !disposed);
+  } finally {
+    markerRunning = false;
+    markerBusy.value = false;
+  }
+}
+
 function applyWorld(close = true): void {
   try {
-    if (
-      !Number.isInteger(height.value) ||
-      height.value < -2048 ||
-      height.value > 2048
-    )
+    if (!Number.isInteger(height.value) || height.value < -2048 || height.value > 2048)
       throw new RangeError("Y 必须是 -2048 到 2048 之间的整数");
-    if (
-      ![cx.value, cz.value].every(
-        (n) => Number.isInteger(n) && Math.abs(n) <= 29_000_000,
-      )
-    )
+    if (![cx.value, cz.value].every((n) => Number.isInteger(n) && Math.abs(n) <= 29_000_000))
       throw new RangeError("中心坐标必须是 ±29,000,000 内的整数");
-    const next = {
+    const next: ViewWorld = {
       version: version.value,
       dimension: dimension.value,
       seed: parseSeed(seed.value),
       y: height.value,
     };
-    if (
-      !world.value ||
-      next.version !== world.value.version ||
-      next.dimension !== world.value.dimension ||
-      next.seed !== world.value.seed ||
-      next.y !== world.value.y
-    ) {
-      frame.value = null;
+    const prev = world.value;
+    const changed =
+      !prev ||
+      next.version !== prev.version ||
+      next.dimension !== prev.dimension ||
+      next.seed !== prev.seed ||
+      next.y !== prev.y;
+    error.value = "";
+    if (changed) {
+      world.value = next;
       markers.value = [];
       selectedMarker.value = null;
       hover.value = null;
+      legend.value = [];
+      board?.setMarkers([], layerColors.value);
+      board?.reset();
     }
-    world.value = next;
+    const c = camera.value;
+    if (Math.round(c.x) !== cx.value || Math.round(c.z) !== cz.value)
+      board?.setCamera({ x: cx.value, z: cz.value });
+    else board?.retry();
     if (close) panelOpen.value = false;
-    void render();
+    void refreshMarkers();
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : String(reason);
+    error.value = message(reason);
   }
 }
 function randomSeed(): void {
@@ -290,25 +247,35 @@ function randomSeed(): void {
   seed.value = BigInt.asIntN(64, data[0]!).toString();
   applyWorld();
 }
-function setZoom(direction: number): void {
-  const index = zooms.indexOf(zoom.value),
-    next = zooms[Math.max(0, Math.min(zooms.length - 1, index + direction))]!;
-  if (next === zoom.value) return;
-  zoom.value = next;
-  void render();
+function zoom(direction: number): void {
+  board?.zoomBy(direction > 0 ? 2 : 0.5);
 }
 function origin(): void {
-  cx.value = 0;
-  cz.value = 0;
   selectedMarker.value = null;
-  void render();
+  board?.select(null);
+  board?.setCamera({ x: 0, z: 0 });
 }
 function toggleLayer(id: string): void {
   selectedLayers.value = selectedLayers.value.includes(id)
     ? selectedLayers.value.filter((item) => item !== id)
     : [...selectedLayers.value, id];
+  updateURL();
+  void refreshMarkers();
+}
+function hideLayers(): void {
+  selectedLayers.value = [];
   selectedMarker.value = null;
-  void render();
+  board?.select(null);
+  updateURL();
+  void refreshMarkers();
+}
+function chooseMarker(marker: ViewMarker | null, center = false): void {
+  selectedMarker.value = marker;
+  board?.select(marker, center);
+}
+function toggleGrid(): void {
+  grid.value = !grid.value;
+  board?.setGrid(grid.value);
 }
 function openTab(next: string): void {
   tab.value = next;
@@ -327,12 +294,8 @@ function panelKeyboard(event: KeyboardEvent): void {
   }
   if (event.key !== "Tab") return;
   const focusable = Array.from(
-    panel.value!.querySelectorAll<HTMLElement>(
-      "button, input, select, a[href]",
-    ),
-  ).filter(
-    (el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0,
-  );
+    panel.value!.querySelectorAll<HTMLElement>("button, input, select, a[href]"),
+  ).filter((el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0);
   const first = focusable[0],
     last = focusable.at(-1);
   if (event.shiftKey && document.activeElement === first) {
@@ -351,114 +314,17 @@ async function copy(text: string): Promise<void> {
     toast("无法访问剪贴板，请从地址栏或坐标栏手动复制");
   }
 }
+function shareLink(): void {
+  updateURL();
+  void copy(location.href);
+}
 function exportImage(): void {
-  if (!canvas.value || !frame.value || busy.value) return;
+  if (!board || !world.value) return;
   const link = document.createElement("a");
-  link.download = `cubiomes-${frame.value.world.version}-${frame.value.world.seed}.png`;
-  link.href = canvas.value.toDataURL("image/png");
+  link.download = `cubiomes-${world.value.version}-${world.value.seed}.png`;
+  link.href = board.exportPNG();
   link.click();
-  toast("已导出群系采样图（不含结构图层）");
-}
-const pointers = new Map<number, { x: number; y: number }>();
-let drag: { x: number; y: number; cx: number; cz: number; k: number } | null =
-  null;
-let pinch: { distance: number; zoom: number } | null = null;
-let wheelTimer = 0;
-function pointerDown(event: PointerEvent): void {
-  if (
-    (event.target as HTMLElement).closest("button") ||
-    !frame.value ||
-    event.button > 0
-  )
-    return;
-  surface.value!.setPointerCapture(event.pointerId);
-  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-  if (pointers.size === 1)
-    drag = {
-      x: event.clientX,
-      y: event.clientY,
-      cx: cx.value,
-      cz: cz.value,
-      k: blocksPerPixel.value,
-    };
-  if (pointers.size === 2) {
-    const [a, b] = [...pointers.values()];
-    pinch = {
-      distance: Math.hypot(a!.x - b!.x, a!.y - b!.y),
-      zoom: zoom.value,
-    };
-    drag = null;
-    dragOffset.value = { x: 0, y: 0 };
-  }
-}
-function pointerMove(event: PointerEvent): void {
-  if (pointers.has(event.pointerId))
-    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-  if (pinch && pointers.size === 2) {
-    const [a, b] = [...pointers.values()];
-    const ratio = Math.hypot(a!.x - b!.x, a!.y - b!.y) / pinch.distance;
-    const wanted = pinch.zoom / ratio;
-    zoom.value = zooms.reduce(
-      (best, n) =>
-        Math.abs(Math.log(n / wanted)) < Math.abs(Math.log(best / wanted))
-          ? n
-          : best,
-      zooms[0]!,
-    );
-    return;
-  }
-  if (drag) {
-    dragOffset.value = { x: event.clientX - drag.x, y: event.clientY - drag.y };
-    return;
-  }
-  if (!frame.value || !surface.value) return;
-  const rect = surface.value.getBoundingClientRect(),
-    r = frame.value.region;
-  const px = Math.floor(((event.clientX - rect.left) / rect.width) * r.w),
-    pz = Math.floor(((event.clientY - rect.top) / rect.height) * r.h);
-  const id = frame.value.biomes[pz * r.w + px];
-  if (id !== undefined)
-    hover.value = {
-      x: (r.x0 + px * r.step) * 4,
-      z: (r.z0 + pz * r.step) * 4,
-      name: friendly(frame.value.names[id] ?? "Unknown"),
-    };
-}
-function pointerUp(event: PointerEvent): void {
-  const cancelled = event.type === "pointercancel";
-  pointers.delete(event.pointerId);
-  if (pinch) {
-    if (pointers.size === 0) {
-      pinch = null;
-      void render();
-    }
-    return;
-  }
-  if (!drag) return;
-  if (!cancelled) {
-    cx.value = Math.max(
-      -29_000_000,
-      Math.min(
-        29_000_000,
-        Math.round(drag.cx - (event.clientX - drag.x) * drag.k),
-      ),
-    );
-    cz.value = Math.max(
-      -29_000_000,
-      Math.min(
-        29_000_000,
-        Math.round(drag.cz - (event.clientY - drag.y) * drag.k),
-      ),
-    );
-  }
-  drag = null;
-  dragOffset.value = { x: 0, y: 0 };
-  void render();
-}
-function wheel(event: WheelEvent): void {
-  event.preventDefault();
-  clearTimeout(wheelTimer);
-  wheelTimer = window.setTimeout(() => setZoom(event.deltaY > 0 ? 1 : -1), 100);
+  toast("已导出当前视野（含结构图标）");
 }
 function keyboard(event: KeyboardEvent): void {
   const movements: Record<string, [number, number]> = {
@@ -470,23 +336,18 @@ function keyboard(event: KeyboardEvent): void {
   const delta = movements[event.key];
   if (delta) {
     event.preventDefault();
-    cx.value = Math.round(
-      Math.max(
-        -29_000_000,
-        Math.min(29_000_000, cx.value + delta[0] * blocksPerPixel.value * 100),
-      ),
-    );
-    cz.value = Math.round(
-      Math.max(
-        -29_000_000,
-        Math.min(29_000_000, cz.value + delta[1] * blocksPerPixel.value * 100),
-      ),
-    );
-    void render();
-  } else if (event.key === "+" || event.key === "=") setZoom(-1);
-  else if (event.key === "-") setZoom(1);
-  else if (event.key === "Escape") selectedMarker.value = null;
+    board?.panBy(delta[0] * 100, delta[1] * 100);
+  } else if (event.key === "+" || event.key === "=") zoom(-1);
+  else if (event.key === "-") zoom(1);
+  else if (event.key === "Escape") chooseMarker(null);
 }
+
+function source(region: { x0: number; z0: number; w: number; h: number; step: number }) {
+  const activeWorld = world.value;
+  if (!activeWorld) return Promise.reject(new Error("World is not ready"));
+  return runtime.frame(activeWorld, region);
+}
+
 onMounted(async () => {
   mobileQuery.addEventListener("change", syncMobile);
   try {
@@ -504,29 +365,56 @@ onMounted(async () => {
       ["y", height],
     ] as const) {
       const raw = params.get(key);
-      if (raw !== null && Number.isFinite(Number(raw)))
-        target.value = Number(raw);
+      if (raw !== null && Number.isInteger(Number(raw))) target.value = Number(raw);
     }
-    if (zooms.includes(Number(params.get("zoom"))))
-      zoom.value = Number(params.get("zoom"));
+    // `scale` is blocks per CSS pixel; legacy `zoom` links meant twice that.
+    const rawScale = Number(params.get("scale") ?? Number(params.get("zoom") ?? 16) / 2);
+    const initialScale = Number.isFinite(rawScale) && rawScale > 0
+      ? Math.min(MAX_SCALE, Math.max(MIN_SCALE, rawScale))
+      : 8;
+    camera.value = { x: cx.value, z: cz.value, scale: initialScale };
     applyWorld(false);
-    resizeObserver = new ResizeObserver(() => {
-      clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(() => void render(), 180);
-    });
-    if (surface.value) resizeObserver.observe(surface.value);
+    board = new MapBoard(canvas.value!, source, {
+      camera(c) {
+        camera.value = c;
+        cx.value = Math.round(c.x);
+        cz.value = Math.round(c.z);
+      },
+      settled() {
+        updateURL();
+        refreshLegend();
+        void refreshMarkers();
+      },
+      hover(info) {
+        hover.value = info ? { x: info.x, z: info.z, name: info.biome ? friendly(info.biome) : "加载中…" } : null;
+      },
+      select(marker) {
+        selectedMarker.value = marker;
+      },
+      status(s) {
+        tiles.value = s;
+        if (s.ready) {
+          hasFrame.value = true;
+          error.value = "";
+          refreshLegend();
+        }
+      },
+      error(reason) {
+        error.value = reason.message;
+      },
+    }, camera.value);
+    board.setGrid(grid.value);
+    void refreshMarkers();
   } catch (reason) {
-    error.value = String(reason);
+    error.value = message(reason);
   }
 });
 onUnmounted(() => {
   disposed = true;
+  board?.destroy();
   runtime.destroy();
-  resizeObserver?.disconnect();
   mobileQuery.removeEventListener("change", syncMobile);
   clearTimeout(toastTimer);
-  clearTimeout(resizeTimer);
-  clearTimeout(wheelTimer);
 });
 </script>
 
@@ -705,14 +593,7 @@ onUnmounted(() => {
         <section v-show="tab === 'layers'" class="layers-panel">
           <div class="row-between mb-3">
             <h2>在地图上显示</h2>
-            <button
-              class="text-button"
-              @click="
-                selectedLayers = [];
-                selectedMarker = null;
-                render();
-              "
-            >
+            <button class="text-button" @click="hideLayers">
               全部隐藏
             </button>
           </div>
@@ -725,16 +606,40 @@ onUnmounted(() => {
           <p v-if="layerError" class="panel-description" role="alert">
             {{ layerError }}
           </p>
+          <p v-if="markerNote" class="panel-description">{{ markerNote }}</p>
           <label v-for="layer in layers" :key="layer.id" class="layer-option"
             ><input
               type="checkbox"
               :checked="selectedLayers.includes(layer.id)"
               @change="toggleLayer(layer.id)"
-            /><span class="layer-glyph" :style="{ color: layer.color }">◆</span
-            ><span
+            /><img
+              class="layer-icon"
+              :src="icon(layer.id)"
+              alt=""
+              width="24"
+              height="24"
+            /><span
               >{{ layer.label }}<small>{{ layer.detail }}</small></span
             ></label
           >
+          <div v-if="visibleMarkers.length" class="marker-list">
+            <div class="row-between mb-2">
+              <h2>视野内结构</h2>
+              <span class="small-chip">{{ visibleMarkers.length }}</span>
+            </div>
+            <button
+              v-for="marker in visibleMarkers"
+              :key="marker.id"
+              class="marker-row"
+              :class="{ chosen: selectedMarker?.id === marker.id }"
+              @click="chooseMarker(marker, true)"
+            >
+              <img :src="icon(marker.layer)" alt="" width="18" height="18" /><span>{{
+                layerById.get(marker.layer)?.label ?? marker.label
+              }}</span
+              ><span class="mono muted">{{ marker.x }}, {{ marker.z }}</span>
+            </button>
+          </div>
           <div class="info-note">
             <span aria-hidden="true">◇</span>
             <p v-if="world?.version === '26.2'">
@@ -785,45 +690,16 @@ onUnmounted(() => {
         class="map-surface"
         tabindex="0"
         role="application"
-        aria-label="群系地图。拖动平移，滚轮或双指缩放，也可使用方向键与加减键。"
+        aria-label="群系地图。拖动平移，滚轮或双指缩放，也可使用方向键与加减键。结构列表位于结构图层面板。"
         :aria-busy="busy"
-        @pointerdown="pointerDown"
-        @pointermove="pointerMove"
-        @pointerup="pointerUp"
-        @pointercancel="pointerUp"
-        @wheel="wheel"
         @keydown="keyboard"
       >
-        <div
-          class="map-content"
-          :style="{
-            transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)`,
-          }"
-        >
-          <canvas
-            ref="canvas"
-            id="map"
-            :class="{ 'has-frame': frame }"
-            aria-label="Minecraft 群系颜色地图"
-          ></canvas>
-          <div v-if="grid" class="map-grid" aria-hidden="true"></div>
-          <button
-            v-for="marker in visibleMarkers"
-            :key="marker.id"
-            class="map-marker"
-            :class="{ chosen: selectedMarker?.id === marker.id }"
-            :style="{
-              left: `${marker.left}%`,
-              top: `${marker.top}%`,
-              '--marker-color': layerById.get(marker.layer)?.color ?? '#e5c379',
-            }"
-            :aria-label="`${marker.label}，X ${marker.x}，Z ${marker.z}`"
-            @pointerdown.stop
-            @click.stop="selectedMarker = marker"
-          >
-            <span aria-hidden="true">◆</span>
-          </button>
-        </div>
+        <canvas
+          ref="canvas"
+          id="map"
+          :class="{ 'has-frame': hasFrame }"
+          aria-label="Minecraft 群系颜色地图"
+        ></canvas>
         <div class="center-cross" aria-hidden="true"></div>
       </div>
       <div class="map-topline">
@@ -834,8 +710,8 @@ onUnmounted(() => {
           <div>
             <strong>{{ dimensionName }}</strong
             ><span
-              >JAVA {{ frame?.world.version ?? version }} <i>·</i> Y
-              {{ frame?.world.y ?? height }}</span
+              >JAVA {{ world?.version ?? version }} <i>·</i> Y
+              {{ world?.y ?? height }}</span
             >
           </div>
         </div>
@@ -843,16 +719,16 @@ onUnmounted(() => {
           <button
             class="icon-button"
             :aria-pressed="grid"
-            aria-label="切换参考网格（非区块网格）"
-            title="参考网格（非区块网格）"
-            @click="grid = !grid"
+            aria-label="切换坐标网格"
+            title="坐标网格（16 方块整数倍，金线为 0 轴）"
+            @click="toggleGrid"
           >
             ▦</button
           ><button
             class="icon-button"
-            aria-label="导出群系 PNG"
-            title="导出群系 PNG（不含结构）"
-            :disabled="!frame || busy"
+            aria-label="导出当前视野 PNG"
+            title="导出当前视野 PNG（含结构图标）"
+            :disabled="!hasFrame"
             @click="exportImage"
           >
             ↓</button
@@ -860,14 +736,14 @@ onUnmounted(() => {
             class="icon-button"
             aria-label="复制地图链接"
             title="复制地图链接"
-            :disabled="!frame || busy"
+            :disabled="!world"
             @click="shareLink"
           >
             ↗
           </button>
         </div>
       </div>
-      <div v-if="!frame && !error" class="map-loading">
+      <div v-if="!hasFrame && !error" class="map-loading">
         <span class="loading-cube"></span><strong>正在寻找你的世界</strong
         ><span>首次使用需要编译计算着色器</span>
       </div>
@@ -887,15 +763,15 @@ onUnmounted(() => {
         <div class="zoom-controls">
           <button
             aria-label="放大地图"
-            :disabled="zoom === 4"
-            @click="setZoom(-1)"
+            :disabled="camera.scale <= MIN_SCALE"
+            @click="zoom(-1)"
           >
             +</button
           ><span></span
           ><button
             aria-label="缩小地图"
-            :disabled="zoom === 128"
-            @click="setZoom(1)"
+            :disabled="camera.scale >= MAX_SCALE"
+            @click="zoom(1)"
           >
             −
           </button>
@@ -915,12 +791,16 @@ onUnmounted(() => {
           ><button
             class="icon-button"
             aria-label="关闭结构详情"
-            @click="selectedMarker = null"
+            @click="chooseMarker(null)"
           >
             ×
           </button>
         </div>
-        <h2>{{ selectedMarker.label }}</h2>
+        <h2 class="marker-title">
+          <img :src="icon(selectedMarker.layer)" alt="" width="24" height="24" />{{
+            selectedMarker.label
+          }}
+        </h2>
         <p class="marker-coordinates mono">
           X {{ selectedMarker.x }} <span>／</span> Z {{ selectedMarker.z }}
         </p>
@@ -951,7 +831,7 @@ onUnmounted(() => {
           >{{ markers.length }} 个结构标记</span
         ><span class="footer-seed mono" :title="displaySeed"
           >SEED {{ displaySeed }}</span
-        ><span class="performance mono">{{ elapsed.toFixed(0) }} ms</span>
+        ><span class="performance mono">{{ tiles.lastMs.toFixed(0) }} ms / 图块</span>
       </div>
       <nav class="mobile-nav" aria-label="移动端工具">
         <button @click="openTab('world')">

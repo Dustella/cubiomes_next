@@ -61,12 +61,43 @@ try {
   );
   await ready(desktop);
   const count = await desktop.evaluate<number>(
-    `document.querySelectorAll('.map-marker').length`,
+    `document.querySelectorAll('.marker-row').length`,
   );
   if (count === 0)
     throw new Error("Expected village candidates in the default viewport");
-  await desktop.evaluate(`document.querySelector('.map-marker').click()`);
+  await desktop.evaluate(`document.querySelector('.marker-row').click()`);
+  if (!(await desktop.evaluate<boolean>(`!!document.querySelector('.marker-card .marker-title img')`)))
+    throw new Error("Marker card is missing its structure icon");
   await record(desktop, "desktop-structures");
+  // Drag 200 px left / 120 px up through real pointer events. The centre must
+  // move by exactly delta × scale and the map must be ready again without any
+  // full recompute flash (canvas keeps has-frame throughout).
+  const drag = await desktop.evaluate<{ before: number[]; after: number[]; scale: number; flashed: boolean; ms: number }>(`(async () => {
+    const c = document.querySelector('#map'), r = c.getBoundingClientRect();
+    const read = () => { const p = new URLSearchParams(location.search); return [Number(p.get('x')), Number(p.get('z'))]; };
+    const scale = Number(new URLSearchParams(location.search).get('scale'));
+    await new Promise(res => setTimeout(res, 400)); // let a pending settle update the URL
+    const before = read();
+    let flashed = false;
+    const watch = new MutationObserver(() => { if (!c.classList.contains('has-frame')) flashed = true; });
+    watch.observe(c, { attributes: true });
+    const x0 = r.left + r.width / 2, y0 = r.top + r.height / 2;
+    const fire = (type, x, y) => c.dispatchEvent(new PointerEvent(type, { pointerId: 7, pointerType: 'mouse', isPrimary: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, bubbles: true }));
+    const t0 = performance.now();
+    fire('pointerdown', x0, y0);
+    for (let i = 1; i <= 20; i++) { fire('pointermove', x0 - 10 * i, y0 - 6 * i); await new Promise(requestAnimationFrame); }
+    fire('pointerup', x0 - 200, y0 - 120);
+    const ms = performance.now() - t0;
+    await new Promise(res => setTimeout(res, 400));
+    watch.disconnect();
+    return { before, after: read(), scale, flashed, ms };
+  })()`);
+  console.log("drag", drag);
+  const dx = drag.after[0]! - drag.before[0]!, dz = drag.after[1]! - drag.before[1]!;
+  if (Math.abs(dx - 200 * drag.scale) > 1 || Math.abs(dz - 120 * drag.scale) > 1)
+    throw new Error(`Drag drifted: moved ${dx},${dz}, expected ${200 * drag.scale},${120 * drag.scale}`);
+  if (drag.flashed) throw new Error("Map cleared during drag");
+  await record(desktop, "desktop-after-drag");
 } finally {
   desktop.close();
 }

@@ -1,6 +1,8 @@
 export interface ViewWorld { version: string; dimension: 'overworld' | 'nether' | 'end'; seed: bigint; y: number }
 /** Horizontal coordinates and step are in quarts; world.y is in blocks. */
 export interface ViewRegion { x0: number; z0: number; w: number; h: number; step: number }
+/** Half-open block-coordinate rectangle. */
+export interface ViewBounds { minX: number; minZ: number; maxX: number; maxZ: number }
 export interface ViewLayer { id: string; label: string; color: string; detail: string }
 /** Marker positions are block coordinates. */
 export interface ViewMarker { id: string; layer: string; label: string; x: number; z: number; detail: string }
